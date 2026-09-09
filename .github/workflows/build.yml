@@ -1,0 +1,94 @@
+name: Build OpenCV.js Lite
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build.yml'
+      - 'config/**'
+      - 'scripts/**'
+      - 'opencv-version.txt'
+      - 'emscripten-version.txt'
+  pull_request:
+    paths:
+      - '.github/workflows/build.yml'
+      - 'config/**'
+      - 'scripts/**'
+      - 'opencv-version.txt'
+      - 'emscripten-version.txt'
+  workflow_dispatch:
+    inputs:
+      opencv_ref:
+        description: OpenCV tag, branch or commit; empty uses opencv-version.txt
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opencv-js-lite-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Resolve versions
+        id: versions
+        env:
+          DISPATCH_OPENCV_REF: ${{ inputs.opencv_ref }}
+        run: |
+          opencv_ref="${DISPATCH_OPENCV_REF:-$(tr -d '[:space:]' < opencv-version.txt)}"
+          emscripten_version="$(tr -d '[:space:]' < emscripten-version.txt)"
+          echo "opencv_ref=${opencv_ref}" >> "$GITHUB_OUTPUT"
+          echo "emscripten_version=${emscripten_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Emscripten
+        env:
+          EMSCRIPTEN_VERSION: ${{ steps.versions.outputs.emscripten_version }}
+        run: |
+          git clone --filter=blob:none --depth 1 --branch "${EMSCRIPTEN_VERSION}" \
+            https://github.com/emscripten-core/emsdk.git .emsdk
+          ./.emsdk/emsdk install "${EMSCRIPTEN_VERSION}"
+          ./.emsdk/emsdk activate "${EMSCRIPTEN_VERSION}"
+
+      - name: Build
+        env:
+          OPENCV_REF: ${{ steps.versions.outputs.opencv_ref }}
+        run: |
+          source ./.emsdk/emsdk_env.sh
+          ./scripts/build.sh "${OPENCV_REF}"
+
+      - name: Verify exported API and solvePnP result
+        run: node ./scripts/verify.cjs ./dist/opencv.pose-lite.js
+
+      - name: Generate build report
+        env:
+          OPENCV_REF: ${{ steps.versions.outputs.opencv_ref }}
+        run: |
+          node ./scripts/write-build-info.mjs ./dist/opencv.pose-lite.js
+          cat ./dist/build-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: opencv-js-lite-${{ steps.versions.outputs.opencv_ref }}
+          path: |
+            dist/opencv.pose-lite.js
+            dist/opencv.pose-lite.js.sha256
+            dist/build-info.json
+            dist/build-summary.md
+          if-no-files-found: error
+          retention-days: 30
